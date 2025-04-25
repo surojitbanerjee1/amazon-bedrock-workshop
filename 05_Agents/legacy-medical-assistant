@@ -1,0 +1,130 @@
+import os
+from datetime import datetime
+import boto3
+from PIL import Image
+import base64
+import time
+import logging
+import random
+from botocore.exceptions import ClientError
+
+# Global variable to store remarks
+document_remarks = []
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+import json
+import io
+from time import sleep
+
+def get_summary(image_path):
+    global document_remarks
+    # Initialize Bedrock client
+    bedrock = boto3.Session().client(
+        service_name='bedrock-runtime',
+        region_name='us-east-1'
+    )
+    
+    # Read and encode image
+    with Image.open(image_path) as img:
+        # Convert to base64
+        buffered = io.BytesIO()
+        img.save(buffered, format=img.format)
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+
+    # Prepare request body for Claude 3.5
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 700,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f'''
+                                You are Family Physician for patient Kamal Banerjee. You write very concise and crisp remarks.
+                                As his Family Physician, review his medical records to provide medical advice.
+                                Patient is in India, around 76yrs old and suffering for multiple ailments. 
+                                
+                                Previous Medical History:
+                                {chr(10).join(document_remarks) if document_remarks else "No previous context available."}
+                                    
+                                As Family Physician of Kamal Banerjee, review the given medical records along with medical history. 
+                                
+                                Summarize current report, remark on medical trends observed based on current report and medical history, 
+                                which may not be apparent from the data in the given medical record but possible looking at trends.
+                                If the same summary was already identified in medical history, then remark any change to it.
+                                
+                                Find any red flags that are not identified in the report or prescription explicitly and needs attention. 
+                                Make sure to identify red flags that may have been missed by medical professionals.
+                                If the same red flag was already identified in medical history, then remark any change to it.
+                    
+                                Ignore all Medical History that are dated after the Record date of current image.
+                                Also suggest if any medical investigation is required to rule out any medical issue.
+                                If the same investigation was already identified in medical history, then remark any change to it. 
+
+                                If Life threatening conditions are detected with high conditions, add a WARNING about it at the end.
+                                If the same warning was already identified in medical history, then remark any change to it.
+
+                                Only provide your advice in the response
+                            '''
+                    },
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": img_str
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    
+    # Make the API call to Claude 3.5
+
+    # Call Bedrock Runtime
+    response = bedrock.invoke_model(
+        #modelId="anthropic.claude-3-haiku-20240307-v1:0",
+        modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+        body=json.dumps(body)
+    )
+    #print(response)
+    # Parse response and extract document type and remarks
+    response_body = json.loads(response.get('body').read())
+    #print(response_body)
+
+    # Parse the inner JSON string contained in the text field
+    if (response_body['content'][0]['text']):
+        document_remark = response_body['content'][0]['text'].strip()
+        document_remarks.append(document_remark)
+    
+    # Keep only the last 5 remarks for context
+    if len(document_remarks) > 200:
+        document_remarks.pop(0)
+    
+    return document_remark
+
+def analyze_medical_documents():
+    # Source and destination folders
+    source_folder = "renamed-documents"
+    
+    # Process each file in source folder in ascending order
+    for filename in sorted(os.listdir(source_folder)):
+        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.pdf')):
+            sleep(10)
+            file_path = os.path.join(source_folder, filename)
+            
+            # Get document type using Claude
+            summary = get_summary(file_path)
+            print(f"File: {filename}\n{summary}\n\n")
+
+            """Save all collected remarks to a text file."""
+            with open('medical_remarks.txt', 'a') as f:
+                    f.write(f"File: {filename}\n{summary}\n\n")
+
+if __name__ == "__main__":
+    analyze_medical_documents()
