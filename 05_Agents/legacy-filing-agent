@@ -1,0 +1,204 @@
+import os
+from datetime import datetime
+import boto3
+from PIL import Image
+import base64
+import time
+import logging
+import random
+from botocore.exceptions import ClientError
+
+# Global variable to store remarks
+document_remarks = []
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+import json
+import io
+from time import sleep
+
+
+def get_document_type(image_path):
+    global document_remarks
+    # Initialize Bedrock client
+    bedrock = boto3.Session().client(
+        service_name='bedrock-runtime',
+        region_name='us-east-1'
+    )
+
+    prompt = f'''
+                You are an expert in categorizing Medical Records. 
+                You are helping to categorize medicakl records for a patient in India. 
+                Patients name is ****. Patient is old and suffering for multiple ailments.  
+                
+                Category ::
+                For the given images for medical record help to Categorize the medical record into generic medical record types. 
+                Ignore header and footer information about the institution while trying to categorize. 
+                Make sure the category provides good information for a medical practitioner to understand the type of the medical data in the image.
+                Use max 3 words to categorize.
+
+                Record Date ::
+                Find any date in the image. Since these records are form India the date will be of the format DD MM YYYY.
+                Once you have some date, format it in the format yyyy-mm-dd
+                If no date is found, use 2025-01-01 
+
+                Label ::
+                From the medical record image, find name of the medical test and name of Doctor.
+                If no test name is specified, try to find a way to describe the nature of the medical record.
+                Do not use Patient name as lable. It should be meaningful for an medical practitioner.
+                Use Max 8 words and no special characters for label. 
+
+                Observation ::
+                Play the role of Family Physician for the patient and summarize the medical record in few sentences. 
+                Make observation about any red flags in the medical record. 
+                Based on Previous Medical context suggest any concerning trends which may not be apparent from the data in one medical record. 
+                Ignore all Remards that are dated after Record date of current image.
+                Also suggest if any further medical investogation is required to rule out any medical issue. 
+                
+                Previous Medical Context:
+                {chr(10).join(document_remarks) if document_remarks else "No previous context available."}
+                
+                Please provide the Record Category, Record Date, Label and Observation in the json formal specified below ::
+                Format :
+                {{
+                    "New_File_Name" : "Record Date - Record Category - Label",
+                    "Remark" : "Record Date  - Observation"
+                }}
+                
+                Example 1 :    
+                {{
+                    "New_File_Name" : "2024-12-27 - OPD Prescription - Dr Humayun Kabir",
+                    "Remark" : "2024-12-27 - Dr Kabir provided medication to treat Bronchiolitis"
+                }}
+                
+                Example 2 : 
+                {{
+                    "New_File_Name" : "2024-12-01 - Medicine Envelope - Biodoxi Tablet",
+                    "Remark" : "2024-12-01 - This is an envelope used in Hospital to inventory prescribed medicines for patients. This is an antibiotic medicine used to treat bacterial infections"
+                }}
+                    
+
+                Final Check before responding
+                1. Remove any special characters in the response, except -
+                2. Check if the response a valid json and the data is good to file a medical record
+                3. Only provide json response as shown in example and nothing else as response 
+                4. If its not at all a medical document, categorize as MISC 
+
+                Only provide json response
+            '''
+
+
+    # Read and encode image
+    if image_path.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff')):
+        with Image.open(image_path) as img:
+            # Convert to base64
+            buffered = io.BytesIO()
+            img.save(buffered, format=img.format)
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+
+    if image_path.lower().endswith(('.pdf')):
+        #convert pdf file to multi image tiff file
+        print("ignoring pdf files for now")
+
+
+    # Prepare request body for Claude 3.5
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 700,
+        "temperature": 0,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": img_str
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    
+    # Make the API call to Claude 3.5
+
+    # Call Bedrock Runtime
+    response = bedrock.invoke_model(
+        #modelId="anthropic.claude-3-haiku-20240307-v1:0",
+        modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+        body=json.dumps(body)
+    )
+    #print(response)
+    # Parse response and extract document type and remarks
+    response_body = json.loads(response.get('body').read())
+    #print(response_body)
+    # Parse the inner JSON string contained in the text field
+    inner_json = json.loads(response_body['content'][0]['text'])
+    document_type = inner_json['New_File_Name'].strip()
+    
+    # Store remarks for context
+    if 'Remark' in inner_json:
+        document_remarks.append(inner_json['Remark'])
+        print(document_remarks)
+    
+    # Keep only the last 5 remarks for context
+    if len(document_remarks) > 40:
+        document_remarks.pop(0)
+    
+    return document_type
+
+def rename_medical_documents():
+    # Source and destination folders
+    source_folder = "scanned-documents"
+    dest_folder = "renamed-documents"
+    
+    # Create destination folder if it doesn't exist
+    if not os.path.exists(dest_folder):
+        os.makedirs(dest_folder)
+    
+    # Process each file in source folder
+    for filename in os.listdir(source_folder):
+        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.pdf')):
+            sleep(10)
+            file_path = os.path.join(source_folder, filename)
+            
+            # Get file creation time
+            creation_time = datetime.fromtimestamp(os.path.getctime(file_path))
+            date_str = creation_time.strftime('%Y-%m-%d %H-%M-%S')
+            
+            # Get document type using Claude
+            doc_type = get_document_type(file_path)
+            
+            # Get file extension
+            _, ext = os.path.splitext(filename)
+            
+            # Create new filename
+            #new_filename = f"{doc_type}-{date_str}{ext}"
+            new_filename = f"{doc_type}{ext}"
+            
+            # Create destination path
+            dest_path = os.path.join(dest_folder, new_filename)
+            
+            # Copy file to new location with new name
+            with open(file_path, 'rb') as src, open(dest_path, 'wb') as dst:
+                dst.write(src.read())
+            
+            print(f"Renamed {filename} to {new_filename}")
+
+def save_remarks_to_file():
+    """Save all collected remarks to a text file."""
+    with open('medical_remarks.txt', 'w') as f:
+        for remark in document_remarks:
+            f.write(f"{remark}\n")
+    print(f"Saved {len(document_remarks)} remarks to medical_remarks.txt")
+
+if __name__ == "__main__":
+    rename_medical_documents()
+    save_remarks_to_file()
